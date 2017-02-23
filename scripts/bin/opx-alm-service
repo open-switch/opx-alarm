@@ -1,0 +1,699 @@
+#!/usr/bin/python
+
+###########################################################################
+#
+# OpenSwitch alarm management service
+#
+# Copyright (c) 2016 Dell Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+#
+# THIS CODE IS PROVIDED ON AN  *AS IS* BASIS, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING WITHOUT
+# LIMITATION ANY IMPLIED WARRANTIES OR CONDITIONS OF TITLE, FITNESS
+# FOR A PARTICULAR PURPOSE, MERCHANTABLITY OR NON-INFRINGEMENT.
+#
+# See the Apache Version 2.0 License for specific language governing
+# permissions and limitations under the License.
+#
+# SYNOPSIS
+#
+# opx-alm-service [ -f <config-file> ]
+#
+# DESCRIPTION
+#
+# This service listens for CPS API events, and will:
+# - log occurence and clearing of alarm conditions;
+# - maintain a list outstanding (active) alarm conditions;
+# - set system LEDs.
+#
+# EXIT STATUS
+#
+# Normally, this application never terminates.  If one of the following
+# errors occurs, this application will terminate with the given exit code:
+#
+# Error in reading configuration file - exit code 1
+#
+# FILES
+#
+# /etc/opx/alms/config.json - Default path for configuration file
+#
+# SEE ALSO
+#
+# opx-show-alms
+#
+###########################################################################
+
+import sys
+import time
+import datetime
+import cps
+import cps_utils
+import cps_object
+import event_log
+import threading
+import optparse
+import json
+import re
+
+log_modname  = 'ALMS'     # Module name, for logging
+log_filename = sys._getframe().f_code.co_filename # Filename, for logging
+
+mutex = None                    # Mutex for access to global data
+
+config = None                   # Configuration, as read from config file
+
+# Logging
+
+def trace(log_id, log_funcname, log_linenum, mesg):
+    event_log.logging(log_modname,
+                      event_log.DEBUG,
+                      log_id,
+                      log_filename,
+                      log_funcname,
+                      log_linenum,
+                      mesg
+                      )
+
+def notice(log_id, log_funcname, log_linenum, mesg):
+    event_log.logging(log_modname,
+                      event_log.NOTICE,
+                      log_id,
+                      log_filename,
+                      log_funcname,
+                      log_linenum,
+                      mesg
+                      )
+
+def warning(log_id, log_funcname, log_linenum, mesg):
+    event_log.logging(log_modname,
+                      event_log.WARNING,
+                      log_id,
+                      log_filename,
+                      log_funcname,
+                      log_linenum,
+                      mesg
+                      )
+
+def error(log_id, log_funcname, log_linenum, mesg):
+    event_log.logging(log_modname,
+                      event_log.ERR,
+                      log_id,
+                      log_filename,
+                      log_funcname,
+                      log_linenum,
+                      mesg
+                      )
+
+# Dummy class, for exceptions indicating CPS API failure
+    
+class Cps_Exception(Exception):
+    pass
+
+# Extract attribute from CPS API object
+# - Throws Cps_Exception if attribute not in given object
+
+def cps_attr_data_get(obj, attr):
+    log_id = 'cps-api'
+    log_funcname = sys._getframe().f_code.co_name
+    d = obj['data']
+    if attr not in d:
+        error(log_id, log_funcname, sys._getframe().f_lineno,
+              'CPS API object attribute {0} not found'.format(attr)
+              )
+        raise Cps_Exception
+    return cps_utils.cps_attr_types_map.from_data(attr, d[attr])
+
+# Do a CPS API get
+# - Throws Cps_Exception if get fails
+
+def cps_get(obj, attrs={}):
+    log_id = 'cps-api'
+    log_funcname = sys._getframe().f_code.co_name
+    resp = []
+    if cps.get([cps_object.CPSObject(obj,
+                                     qual='observed',
+                                     data=attrs
+                                     ).get()
+                ],
+               resp
+               ):
+        return resp
+    error(log_id, log_funcname, sys._getframe().f_lineno,
+          'CPS API get {0} failed'.format(obj)
+          )
+    raise Cps_Exception
+
+# Do a CPS API set
+# - Throws Cps_Exception if set fails
+
+def cps_set(obj, attrs={}):
+    log_id = 'cps-api'
+    log_funcname = sys._getframe().f_code.co_name
+    if cps.transaction([{'operation': 'set',
+                         'change': cps_object.CPSObject(obj,
+                                                        qual='target',
+                                                        data=attrs).get()
+                         }
+                        ]
+                       ):
+        return
+    error(log_id, log_funcname, sys._getframe().f_lineno,
+          'CPS API set {0} failed'.format(obj)
+          )
+    raise Cps_Exception
+
+# Extract the qualifier from a CPS API key
+
+def cps_key_qual(key):
+    return ['',
+            'target',
+            'observed',
+            'proposed',
+            'realtime'
+            ][int(key.split('.')[0])]
+
+# Extract the subcategory from a CPS API key
+
+def cps_key_subcat(key):
+    return int(key.split('.')[2])
+
+# All conditions:
+#
+# System board fault
+# PSU <slot> airflow <airflow> fan <fan> fault
+# PSU <slot> airflow <airflow> fault
+# PSU <slot> airflow <airflow> incorrect PPID
+# PSU <slot> airflow <airflow> incorrect airflow
+# PSU <slot> airflow <airflow> present
+# PSU <slot> absent
+# Fan tray <slot> airflow <airflow> fan <fan> fault
+# Fan tray <slot> airflow <airflow> fault
+# Fan tray <slot> airflow <airflow> incorrect PPID
+# Fan tray <slot> airflow <airflow> incorrect airflow
+# Fan tray <slot> airflow <airflow> present
+# Fan tray <slot> absent
+# Temperature sensor <sensor> nominal
+# Temperature sensor <sensor> warning
+# Temperature sensor <sensor> minor
+# Temperature sensor <sensor> major
+# Temperature sensor <sensor> critical
+
+# Helper functions to form condition strings
+
+def cond_any_str(s):
+    return '.*' if s is None else s
+
+def cond_any_num(s):
+    return '[0-9]+' if s is None else s
+
+def cond_system_board_fault():
+    return 'System board fault'
+
+def cond_fan_fault(et, slot, airflow, fan_idx):
+    return ('{0} {1} airflow {2} fan {3} fault'
+            .format(cond_any_str(et),
+                    cond_any_num(slot),
+                    cond_any_str(airflow),
+                    cond_any_num(fan_idx)
+                    )
+            )
+
+def cond_entity_fault(et, slot, airflow):
+    return ('{0} {1} airflow {2} fault'
+            .format(cond_any_str(et),
+                    cond_any_num(slot),
+                    cond_any_str(airflow)
+                    )
+            )
+
+def cond_entity_wrong_ppid(et, slot, airflow):
+    return ('{0} {1} airflow {2} incorrect PPID'
+            .format(cond_any_str(et),
+                    cond_any_num(slot),
+                    cond_any_str(airflow)
+                    )
+            )
+
+def cond_entity_wrong_airflow(et, slot, airflow):
+    return ('{0} {1} airflow {2} incorrect airflow'
+            .format(cond_any_str(et),
+                    cond_any_num(slot),
+                    cond_any_str(airflow)
+                    )
+            )
+
+def cond_entity_present(et, slot, airflow):
+    return ('{0} {1} airflow {2} present'
+            .format(cond_any_str(et),
+                    cond_any_num(slot),
+                    cond_any_str(airflow)
+                    )
+           )
+
+def cond_entity_absent(et, slot):
+    return ('{0} {1} absent'
+            .format(cond_any_str(et),
+                    cond_any_num(slot)
+                    )
+           )
+
+def cond_temp_sensor_lvl(sensor, lvl):
+    return ('Temperature sensor {0} {1}'
+            .format(cond_any_str(sensor),
+                    cond_any_str(lvl)
+                    )
+            )
+
+# Log a condition change
+
+def cond_log(mesg):
+    log_id = 'alarm'
+    log_funcname = sys._getframe().f_code.co_name
+    notice(log_id, log_funcname, sys._getframe().f_lineno, mesg)
+
+# Test if condition is alarm
+
+non_alm_conds = ('.* present', '.* nominal')
+
+def cond_is_alm(cond):
+    return (reduce(lambda a, b: a and b,
+                   map(lambda p: re.match(p, cond) is None, non_alm_conds),
+                   True
+                   )
+           )
+
+# Set or clear a condition
+
+conditions = {}
+
+def cond_setclr(cond, flag):
+    log_mesg = None
+    if flag and cond not in conditions:
+        conditions[cond] = datetime.datetime.now()
+        log_mesg = cond
+    if not flag and cond in conditions:
+        del conditions[cond]
+        log_mesg = cond + ' cleared'
+    if log_mesg is not None and cond_is_alm(cond):
+        cond_log(log_mesg)
+
+# Clear all conditions matching given pattern
+
+def cond_clr_matching(p):
+    for c in conditions.keys():
+        if re.match(p, c) is not None:
+            cond_setclr(c, False)
+
+# Constants re: PAS objects
+
+PAS_ENTITY_TYPE_PSU          = 1
+PAS_ENTITY_TYPE_FAN_TRAY     = 2
+PAS_ENTITY_TYPE_SYSTEM_BOARD = 3
+ENTITY_TYPES = {PAS_ENTITY_TYPE_PSU:          'PSU',
+                PAS_ENTITY_TYPE_FAN_TRAY:     'Fan tray',
+                PAS_ENTITY_TYPE_SYSTEM_BOARD: 'System board'
+                }
+
+PAS_FAN_AIRFLOW_NORMAL  = 2
+PAS_FAN_AIRFLOW_REVERSE = 3
+AIRFLOWS = {PAS_FAN_AIRFLOW_NORMAL:  'normal',
+            PAS_FAN_AIRFLOW_REVERSE: 'reverse'
+            }
+
+PAS_OPER_STATUS_OK = 1
+
+# Constants re: tempctl objects
+
+TEMPCTL_FAULT_LVL_NOMINAL  = 1
+TEMPCTL_FAULT_LVL_WARNING  = 6
+TEMPCTL_FAULT_LVL_MINOR    = 5
+TEMPCTL_FAULT_LVL_MAJOR    = 4
+TEMPCTL_FAULT_LVL_CRITICAL = 3
+TEMPCTL_FAULT_LVLS = {TEMPCTL_FAULT_LVL_NOMINAL  : "nominal",
+                      TEMPCTL_FAULT_LVL_WARNING  : "warning",
+                      TEMPCTL_FAULT_LVL_MINOR    : "minor",
+                      TEMPCTL_FAULT_LVL_MAJOR    : "major",
+                      TEMPCTL_FAULT_LVL_CRITICAL : "critical"
+                      }
+
+# Set or clear conditions based on entity status
+
+entity_airflows = {}
+
+def process_entity(obj):
+    log_id = 'entity'
+    log_funcname = sys._getframe().f_code.co_name
+    et          = ENTITY_TYPES[cps_attr_data_get(obj,
+                                                 'base-pas/entity/entity-type'
+                                                 )
+                              ]
+    slot        = cps_attr_data_get(obj, 'base-pas/entity/slot')
+    k           = (et, slot)
+    present     = cps_attr_data_get(obj, 'base-pas/entity/present')
+    oper_status = cps_attr_data_get(obj, 'base-pas/entity/oper-status')
+    trace(log_id, log_funcname, sys._getframe().f_lineno,
+          'Processing entity, et={0}, slot={1}, present={2}, oper_status={3}'
+          .format(et, slot, present, oper_status)
+          )
+    if present == 0:
+        for p in (cond_fan_fault(et, slot, None, None),
+                  cond_entity_fault(et, slot, None),
+                  cond_entity_wrong_ppid(et, slot, None),
+                  cond_entity_wrong_airflow(et, slot, None),
+                  cond_entity_present(et, slot, None)
+                  ):
+            cond_clr_matching(p)
+        cond_setclr(cond_entity_absent(et, slot), True)
+        entity_airflows.pop(k, None)
+        return
+    if et == 'System board':
+        cond_setclr(cond_system_board_fault(),
+                    oper_status != PAS_OPER_STATUS_OK
+                    )
+        return
+    old_airflow = entity_airflows.get(k, 'unknown')
+    if old_airflow == 'unknown':
+        cps_subcat  = 'psu' if et == 'PSU' else 'fan-tray'
+        entity_airflows[k] = AIRFLOWS.get(
+            cps_attr_data_get(cps_get('base-pas/' + cps_subcat,
+                                      {'slot': slot}
+                                      )[0],
+                              'base-pas/' + cps_subcat + '/fan-airflow-type'
+                              ),
+            'unknwon'
+            )
+        trace(log_id, log_funcname, sys._getframe().f_lineno,
+              'Airflow for et={0}, slot={1} is {2}'
+              .format(et, slot, entity_airflows[k])
+              )
+    cond_setclr(cond_entity_absent(et, slot), False)
+    if old_airflow == 'unknown' and entity_airflows[k] != 'unknown':
+        for p in (cond_entity_fault(et, slot, None),
+                  cond_entity_present(et, slot, None)
+                  ):
+            cond_clr_matching(p)
+        if 'airflow' in config and entity_airflow[k] != config['airflow']:
+            cond_entity_wrong_airflow(et, slot, entity_airflow[k])
+    cond_setclr(cond_entity_present(et, slot, entity_airflows[k]), True)
+    cond_setclr(cond_entity_fault(et, slot, entity_airflows[k]),
+                oper_status != PAS_OPER_STATUS_OK
+                )
+
+# Set or clear conditions based on fan status
+
+def process_fan(obj):
+    log_id = 'fan'
+    log_funcname = sys._getframe().f_code.co_name
+    et = ENTITY_TYPES[cps_attr_data_get(obj,
+                                        'base-pas/fan/entity-type'
+                                        )
+                      ]
+    slot        = cps_attr_data_get(obj, 'base-pas/fan/slot')
+    fan_idx     = cps_attr_data_get(obj, 'base-pas/fan/fan-index')
+    oper_status = cps_attr_data_get(obj, 'base-pas/fan/oper-status')
+    trace(log_id, log_funcname, sys._getframe().f_lineno,
+          'Processing fan, et={0}, slot={1}, fan_idx={2}, oper_status={3}'
+          .format(et, slot, fan_idx, oper_status)
+          )
+    cond_setclr(cond_fan_fault(et,
+                               slot, 
+                               entity_airflows[(et, slot)],
+                               fan_idx
+                               ),
+                oper_status != PAS_OPER_STATUS_OK
+                )
+
+# Set or clear alarms based on temperature fault status
+
+def process_temp_fault(obj):
+    log_id = 'temperature'
+    log_funcname = sys._getframe().f_code.co_name
+    sensor = cps_attr_data_get(obj, 'base-env-tempctl/fault/sensor-name')
+    fault_type = cps_attr_data_get(obj, 'base-env-tempctl/fault/fault-type')
+    trace(log_id, log_funcname, sys._getframe().f_lineno,
+          'Processing temperature fault, sensor={0}, fault_type={1}'
+          .format(sensor, fault_type)
+          )
+    cond = cond_temp_sensor_lvl(sensor, TEMPCTL_FAULT_LVLS[fault_type])
+    if cond in conditions:
+        return
+    p = cond_temp_sensor_lvl(sensor, None)
+    for c in conditions.keys():
+        if re.match(p, c) is not None:
+            del conditions[c]
+    conditions[cond] = datetime.datetime.now()
+    cond_log(cond)
+
+# Set or clear alarms based on entity faults from temperature control
+
+def process_temp_entity_fault(obj):
+    log_id = 'entity'
+    log_funcname = sys._getframe().f_code.co_name
+    et = ENTITY_TYPES[cps_attr_data_get(obj,
+                                        'base-env-tempctl/entity-fault/entity-type'
+                                        )
+                      ]
+    slot = cps_attr_data_get(obj, 'base-env-tempctl/entity-fault/slot')
+    invalid_ppid = cps_attr_data_get(obj, 'base-env-tempctl/entity-fault/ppid')
+    incorrect_airflow = cps_attr_data_get(obj, 'base-env-tempctl/entity-fault/airflow')
+    trace(log_id, log_funcname, sys._getframe().f_lineno,
+          'Processing temperature entity fault, entity_type={0}, slot={1}, invalid_ppid={2}, incorrect_airflow={3}'
+          .format(et, slot, invalid_ppid, incorrect_airflow)
+          )
+    af = entity_airflows.get((et, slot), None)
+    cond_setclr(cond_entity_wrong_ppid(et, slot, af), invalid_ppid != 0)
+    cond_setclr(cond_entity_wrong_airflow(et, slot, af), incorrect_airflow != 0)
+    
+# Scan hardware and set initial state
+
+def init_hw():
+    log_id = 'init'
+    log_funcname = sys._getframe().f_code.co_name
+    trace(log_id, log_funcname, sys._getframe().f_lineno,
+          'Retrieving hardware state'
+          )
+    try:
+        resp = cps_get('base-pas/entity')
+        for r in resp:
+            process_entity(r)
+        resp = cps_get('base-pas/fan')
+        for r in resp:
+            process_fan(r)
+        resp = cps_get('base-env-tempctl/fault')
+        for r in resp:
+            process_temp_fault(r)
+        resp = cps_get('base-env-tempctl/entity-fault')
+        for r in resp:
+            process_temp_entity_fault(r)
+    except Cps_Exception:
+        return False
+    return True
+
+# Turn the given LED on or off
+
+def led_set(nm, on_off):
+    log_id = 'led'
+    log_funcname = sys._getframe().f_code.co_name
+    trace(log_id, log_funcname, sys._getframe().f_lineno,
+          'Setting LED {0} to {1}'
+          .format(nm, on_off)
+          )
+    cps_set('base-pas/led', {'entity-type': PAS_ENTITY_TYPE_SYSTEM_BOARD,
+                             'slot': 1,
+                             'name': str(nm),
+                             'on': on_off
+                             }
+           )
+
+# Set all LEDs based on current condition state
+
+def leds_all_set():
+    state = {}
+    leds = config['leds']
+    for i in leds:
+        state[i] = 0
+    for c in config['conditions']:
+        for k in conditions:
+            if re.match(c[0], k) is not None:
+                state[c[1]] = 1
+    for i in leds:
+        if state[i] == 1:
+            led_set(i, 1)
+    for i in leds:
+        if state[i] == 0:
+            led_set(i, 0)
+
+# Listen for events
+
+CPS_KEY_ENTITY      = cps.key_from_name('observed', 'base-pas/entity')
+CPS_KEY_FAN         = cps.key_from_name('observed', 'base-pas/fan')
+CPS_KEY_TEMP_THRESH = cps.key_from_name('observed', 'base-env-tempctl/fault')
+CPS_KEY_TEMP_ENTITY = cps.key_from_name('observed', 'base-env-tempctl/entity-fault')
+
+cps_ev_hdl = None
+
+def init_events():
+    global cps_ev_hdl
+    cps_ev_hdl = cps.event_connect()
+    for k in (CPS_KEY_ENTITY, CPS_KEY_FAN, CPS_KEY_TEMP_THRESH, CPS_KEY_TEMP_ENTITY):
+        cps.event_register(cps_ev_hdl, k)
+
+# Process incoming events
+# - Only returns if a CPS API error occurrs
+
+def process_events():
+    while True:
+        leds_all_set()
+        obj = cps.event_wait(cps_ev_hdl)
+        k = obj['key']
+        mutex.acquire()
+        try:
+            if k == CPS_KEY_ENTITY:
+                process_entity(obj)
+            elif k == CPS_KEY_FAN:
+                process_fan(obj)
+            elif k == CPS_KEY_TEMP_THRESH:
+                process_temp_fault(obj)
+            elif k == CPS_KEY_TEMP_ENTITY:
+                process_temp_entity_fault(obj)
+        except Cps_Exception:
+            # N.B.  Holding the mutex is intentional
+            return
+        mutex.release()
+
+# Compose reply for a CPS API get request for all active alarms
+
+def cps_active_alms_get(params):
+    log_id = 'cps-api'
+    log_funcname = sys._getframe().f_code.co_name
+    trace(log_id, log_funcname, sys._getframe().f_lineno,
+          'Got request for active alarms'
+          )
+    req_obj  = params['filter']
+    q = cps_key_qual(req_obj['key'])
+    li = []
+    mutex.acquire()
+    for c in conditions.items():
+        if not cond_is_alm(c[0]):
+            continue
+        li.append((c[1], c[0]))
+    mutex.release()
+    li = sorted(li, lambda a, b: cmp(a[0], b[0]))
+    for i in li:
+        params['list'].append(
+            cps_object.CPSObject('base-alms/active-alms',
+                                 qual=q,
+                                 data={'timestamp': str(i[0]),
+                                       'alarm': i[1]
+                                   }
+                                 ).get()
+                              )
+
+# CPS API get callback
+
+CPS_KEY_SUBCAT_ACTIVE_ALMS = cps_key_subcat(
+    cps.key_from_name('observed',
+                      'base-alms/active-alms'
+                      )
+                                           )
+
+def cps_get_cb(method, params):
+    log_id = 'cps-api'
+    log_funcname = sys._getframe().f_code.co_name
+    trace(log_id, log_funcname, sys._getframe().f_lineno, 'Got get request')
+    k = params['filter']['key']
+    subcat = cps_key_subcat(k)
+    if subcat == CPS_KEY_SUBCAT_ACTIVE_ALMS:
+        cps_active_alms_get(params)
+    else:
+        error(log_id, log_funcname, sys._getframe().f_lineno,
+              'Received CPS API get for unexpected key ({0})'.format(k)
+              )
+    return True
+
+# CPS API transaction callback
+
+def cps_xaction_cb(methods, params):
+    log_id = 'cps-api'
+    log_funcname = sys._getframe().f_code.co_name
+    trace(log_id, log_funcname, sys._getframe().f_lineno, 'Got xaction')
+    return False
+
+# Initialize servicing of incoming CPS API requests
+
+def init_server():
+    h = cps.obj_init()
+    quals = ('observed', 'realtime')
+    for q in quals:
+        cps.obj_register(h,
+                         cps.key_from_name(q, 'base-alms'),
+                         {'get': cps_get_cb, 'transaction': cps_xaction_cb}
+                         )
+
+# Read the configuration file
+        
+def init_config():
+    log_id = 'init'
+    log_funcname = sys._getframe().f_code.co_name
+    parser = optparse.OptionParser()
+    parser.add_option("-f", "--file", dest="filename",
+                      default='/etc/opx/alms/config.json',
+                      help="Specify configuration file"
+                      )
+    (options, args) = parser.parse_args()
+    notice(log_id, log_funcname, sys._getframe().f_lineno,
+           'Reading configuration from {0}'.format(options.filename)
+           )
+    try:
+        global config
+        config = json.load(open(options.filename))
+    except:
+        error(log_id, log_funcname, sys._getframe().f_lineno,
+              'Failed to read configuration file'
+              )
+        sys.exit(1)
+
+# Reset state
+
+def init_state():
+    global conditions, entity_airflows
+    conditions = {}
+    entity_airflows = {}
+        
+# Mainline
+
+def main():
+    log_id = 'init'
+    log_funcname = sys._getframe().f_code.co_name
+    notice(log_id, log_funcname, sys._getframe().f_lineno, 'Starting')
+    global mutex
+    mutex = threading.Lock()
+    init_config()               # Read the config file
+    init_state()
+    init_server()               # Register for owned CPS API objects
+    init_events()               # Subscribe to CPS API events
+    while True:
+        mutex.acquire()
+        if init_hw():                   # Scan the hardware
+            mutex.release()
+            notice(log_id, log_funcname, sys._getframe().f_lineno,
+                   'Initialization completed'
+                   )
+            process_events()            # Process events as they occur
+        #
+        # Hardware probe failed or error processing event
+        # N.B.  Mutex held here; see process_events()
+        #
+        init_state()            # Chuck state, will re-probe hardware
+        mutex.release()
+        time.sleep(5)           # Pause and retry
+        notice(log_id, log_funcname, sys._getframe().f_lineno,
+               'Restarting'
+               )
+
+        
+if __name__ == '__main__':
+    main()

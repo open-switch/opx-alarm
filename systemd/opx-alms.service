@@ -1,0 +1,17 @@
+[Unit]
+Description=OPX alarm service
+After=opx-pas.service opx-tmpctl.service
+Wants=opx-pas.service opx-tmpctl.service
+DefaultDependencies=no
+
+[Service]
+EnvironmentFile=/etc/opx/opx-environment
+ExecStart=/usr/bin/opx-alm-service
+KillSignal=SIGKILL
+SuccessExitStatus=SIGKILL
+
+# Resource Limitations
+LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target

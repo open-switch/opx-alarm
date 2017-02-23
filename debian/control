@@ -1,0 +1,12 @@
+Source: opx-alms
+Section: net
+Priority: optional
+Maintainer: Dell EMC <ops-dev@lists.openswitch.net>
+Build-Depends: debhelper (>= 9),dh-autoreconf,dh-systemd,autotools-dev
+Standards-Version: 3.9.3
+
+Package: opx-alms
+Architecture: all
+Depends: ${shlibs:Depends}, ${misc:Depends}, libopx-base-model1
+Description: Files common to all platforms
+

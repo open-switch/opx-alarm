@@ -1,0 +1,29 @@
+{
+    "$schema": "http://json-schema.org/draft-04/schema#",
+    "title": "Alarm service",
+    "description": "Configuration of alarm service",
+    "type": "object",
+    "properties": {
+	"leds": {
+	    "description": "List of LED names, in priority order, highest to lowest",
+	    "type": "array",
+	    "items": {
+		"description": "LED name",
+		"type": "string"
+	    }
+	},
+
+	"conditions": {
+	    "description": "Mapping of conditions to LEDs",
+	    "type": "array",
+            "items": {
+                "description": "Mapping from condition LED",
+                "type": "array",
+                "items": {
+                    "description": "First element is regular expression to match condition; second element is LED name"
+                    "type": "string"
+                }
+            }
+	}
+    }
+}
