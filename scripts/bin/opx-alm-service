@@ -175,11 +175,6 @@ def cps_key_qual(key):
             'realtime'
             ][int(key.split('.')[0])]
 
-# Extract the subcategory from a CPS API key
-
-def cps_key_subcat(key):
-    return int(key.split('.')[2])
-
 # All conditions:
 #
 # System board fault
@@ -594,19 +589,14 @@ def cps_active_alms_get(params):
 
 # CPS API get callback
 
-CPS_KEY_SUBCAT_ACTIVE_ALMS = cps_key_subcat(
-    cps.key_from_name('observed',
-                      'base-alms/active-alms'
-                      )
-                                           )
+CPS_KEY_ACTIVE_ALMS = cps.key_from_name('observed', 'base-alms/active-alms')
 
 def cps_get_cb(method, params):
     log_id = 'cps-api'
     log_funcname = sys._getframe().f_code.co_name
     trace(log_id, log_funcname, sys._getframe().f_lineno, 'Got get request')
     k = params['filter']['key']
-    subcat = cps_key_subcat(k)
-    if subcat == CPS_KEY_SUBCAT_ACTIVE_ALMS:
+    if k == CPS_KEY_ACTIVE_ALMS:
         cps_active_alms_get(params)
     else:
         error(log_id, log_funcname, sys._getframe().f_lineno,
