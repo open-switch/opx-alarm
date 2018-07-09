@@ -7,7 +7,7 @@ opx-alm-service \- OPX alarm service
 .OP \-\-file file
 .YS
 .SH DESCRIPTION
-This service montiors system status, and as status changes, it drives front-panel LEDs to indicate status.
+This service monitors system status, and as status changes, it drives front-panel LEDs to indicate status.
 .PP
 It also maintains current system status, in the form of a list of outstanding alarm conditions, which can be queried via the CPS API base-alms/active-alms object.
 .SH OPTIONS
@@ -15,7 +15,7 @@ It also maintains current system status, in the form of a list of outstanding al
 \fB\-f\fR \fIfile\fR, \fB\-\-file\fR \fIfile\fR
 Specify a JSON file configuration file, describing what events to monitor, and how to drive front-panel LEDs.
 .br
-If this option is not given, the default configuration file is: /etc/opx/alms/config.json
+If this option is not given, the default configuration file is /etc/opx/alms/config.json.
 .SH EXIT STATUS
 This is intended to be a long-lived service, started by systemd, always running while the system is up.
 .br
@@ -25,8 +25,8 @@ If it does exit, with exit code 1, an error in reading the configuration file oc
 /etc/opx/alms/config.json
 Default configuration file
 .SH REPORTING BUGS
-To report any OPX software bugs, please refer to https://github.com/open-switch/opx-docs/wiki/Report-bugs.
+To report any OPX software bugs, see https://github.com/open-switch/opx-docs/wiki/Report-bugs.
 .SH COPYRIGHT
-Copyright \(co 2018 Dell Inc. and its subsidiaries. All Rights Reserved.
+\(co 2018 Dell Inc. or its subsidiaries. All Rights Reserved.
 .SH SEE ALSO
 opx-show-alms(1), opx-alm-service(5)

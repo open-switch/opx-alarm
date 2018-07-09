@@ -4,13 +4,13 @@ config.json \- OPX alarm service configuration file
 .SH DESCRIPTION
 This file configures the OPX alarm service.
 .PP
-It has 2 purposes:
+It has two purposes:
 .IP \(bu
 to define the LEDs that will be controlled, and their priority ordering; and
 .IP \(bu
 to define which conditions cause LEDs to be turned on.
 .PP
-This file is a JSON file, with a top-level object having 2 properties:
+This file is a JSON file, with a top-level object having two properties:
 .IP \(bu
 leds
 .IP \(bu
@@ -18,13 +18,13 @@ conditions
 .SS leds
 The value of the leds property is a list of LED names (strings).  The LEDs are listed in increasing order of priority.
 .SS conditions
-The value of the conditions property is a list of pairs (2-element lists), with the first element of each pair being a regular expression (string), and the second being an LED name (string).  When a condition that matches the regular expression is outstanding, the corresponding LED will be turned on.  LEDs will be turned on in the defined priority order, such that if 2 LEDs map to the same physical LED, the higher priority LED will control the physical LED.
+The value of the conditions property is a list of pairs (two-element lists), with the first element of each pair being a regular expression (string), and the second being an LED name (string).  When a condition that matches the regular expression is outstanding, the corresponding LED will be turned on.  LEDs will be turned on in the defined priority order, such that if two LEDs map to the same physical LED, the higher priority LED will control the physical LED.
 .PP
 A schema for this file is included in the source repo opx-alarm.
 .PP
 By default, the OPX alarm service opx-alm-service will look for the configuration file /etc/opx/alms/config.json.
 .SH EXAMPLE
-The following is the contents of the configuration file for a DellEMC S6010-ON switch:
+The following are the contents of the configuration file for a Dell EMC S6010-ON switch:
 .PP
 .nf
 .eo
@@ -112,6 +112,6 @@ The following is the contents of the configuration file for a DellEMC S6010-ON s
 .SH REPORTING BUGS
 To report any OPX software bugs, please refer to https://github.com/open-switch/opx-docs/wiki/Report-bugs.
 .SH COPYRIGHT
-Copyright \(co 2018 Dell Inc. and its subsidiaries. All Rights Reserved.
+\(co 2018 Dell Inc. or its subsidiaries. All Rights Reserved.
 .SH SEE ALSO
 opx-alm-service(1opx)
