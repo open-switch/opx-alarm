@@ -12,10 +12,10 @@
 # See the Apache Version 2.0 License for specific language governing
 # permissions and limitations under the License.
 
-bin_SCRIPTS =	./scripts/bin/opx-alm-service ./scripts/bin/opx-show-alms
+bin_SCRIPTS =	./scripts/bin/opx-alm-service
 
 systemdconfdir =	/lib/systemd/system
 systemdconf_DATA =	systemd/*.service
 
-man1_MANS = man/man1/opx-alm-service.1 man/man1/opx-show-alms.1
+man1_MANS = man/man1/opx-alm-service.1
 man5_MANS = man/man5/opx-alm-service.5
